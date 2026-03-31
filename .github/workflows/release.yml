@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (aarch64-gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Install cross-compilation tools (x86_64-musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (aarch64-musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../json5-to-json-${{ matrix.target }}.tar.gz json5-to-json
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/json5-to-json.exe -DestinationPath json5-to-json-${{ matrix.target }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: json5-to-json-${{ matrix.target }}
+          path: json5-to-json-${{ matrix.target }}.*
+
+  universal:
+    needs: build
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: json5-to-json-x86_64-apple-darwin
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: json5-to-json-aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          mkdir -p x86_64 aarch64
+          tar xzf json5-to-json-x86_64-apple-darwin.tar.gz -C x86_64
+          tar xzf json5-to-json-aarch64-apple-darwin.tar.gz -C aarch64
+          lipo -create x86_64/json5-to-json aarch64/json5-to-json -output json5-to-json
+          tar czf json5-to-json-universal-apple-darwin.tar.gz json5-to-json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: json5-to-json-universal-apple-darwin
+          path: json5-to-json-universal-apple-darwin.tar.gz
+
+  release:
+    needs: [build, universal]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            json5-to-json-*.tar.gz
+            json5-to-json-*.zip
